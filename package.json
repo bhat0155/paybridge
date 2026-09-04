@@ -1,0 +1,14 @@
+{
+  "name": "paybridge",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:ingest": "npm run dev -w services/ingest-api",
+    "dev:processor": "npm run dev -w services/processor",
+    "dev:reconciliation": "npm run dev -w services/reconciliation-api"
+  }
+}
