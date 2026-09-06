@@ -8,7 +8,9 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "@paybridge/shared": "*"
+    "@paybridge/shared": "*",
+    "dotenv": "^16.4.5",
+    "redis": "^4.7.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",

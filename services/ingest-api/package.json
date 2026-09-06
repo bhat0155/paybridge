@@ -5,16 +5,22 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@paybridge/shared": "*",
-    "express": "^4.19.2"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "redis": "^4.7.0",
+    "stripe": "^16.9.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.9",
     "typescript": "^5.5.4",
-    "tsx": "^4.16.2"
+    "tsx": "^4.16.2",
+    "vitest": "^2.1.1"
   }
 }

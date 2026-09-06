@@ -7,8 +7,20 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "dev:ingest": "npm run dev -w services/ingest-api",
-    "dev:processor": "npm run dev -w services/processor",
-    "dev:reconciliation": "npm run dev -w services/reconciliation-api"
+    "test": "npm run test --workspaces --if-present",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "dev:ingest": "dotenv -e .env -- npm run dev -w services/ingest-api",
+    "dev:processor": "dotenv -e .env -- npm run dev -w services/processor",
+    "dev:reconciliation": "dotenv -e .env -- npm run dev -w services/reconciliation-api",
+    "mock:qb": "dotenv -e .env -- tsx scripts/qb-mock.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^7.4.2",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
   }
 }

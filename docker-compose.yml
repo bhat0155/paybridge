@@ -1,0 +1,18 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+
+  sql:
+    image: mcr.microsoft.com/azure-sql-edge:1.0.7
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${SQL_SA_PASSWORD}"
+    ports:
+      - "1433:1433"
+    volumes:
+      - paybridge-sql-data:/var/opt/mssql
+
+volumes:
+  paybridge-sql-data:
