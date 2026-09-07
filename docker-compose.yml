@@ -13,6 +13,60 @@ services:
       - "1433:1433"
     volumes:
       - paybridge-sql-data:/var/opt/mssql
+    healthcheck:
+      # azure-sql-edge ships no sqlcmd (confirmed in Phase 2) — a raw TCP check
+      # via bash's /dev/tcp is the lightest thing that actually proves the port
+      # is accepting connections, not just that the container process started.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  ingest-api:
+    build:
+      context: .
+      dockerfile: services/ingest-api/Dockerfile
+    image: paybridge-ingest-api:local
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3001:3001"
+    depends_on:
+      - redis
+    restart: on-failure
+
+  processor:
+    build:
+      context: .
+      dockerfile: services/processor/Dockerfile
+    image: paybridge-processor:local
+    env_file: .env
+    environment:
+      SQL_HOST: sql
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_started
+      sql:
+        condition: service_healthy
+    restart: on-failure
+
+  reconciliation-api:
+    build:
+      context: .
+      dockerfile: services/reconciliation-api/Dockerfile
+    image: paybridge-reconciliation-api:local
+    env_file: .env
+    environment:
+      SQL_HOST: sql
+    ports:
+      - "3003:3003"
+    depends_on:
+      sql:
+        condition: service_healthy
+    restart: on-failure
 
 volumes:
   paybridge-sql-data:
