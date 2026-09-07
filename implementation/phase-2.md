@@ -483,6 +483,102 @@ curl http://localhost:3003/transactions?source=qb
 # confirm processor logs "duplicate event ... skipping" and only one row exists.
 ```
 
+## Hands-on scenarios — replicate these yourself
+
+The `Verification` block above is the terse command list. This section is the same thing broken into scenarios with **what you should actually see** and **what it proves**, so you can run each one yourself and watch the system behave, not just trust that it compiled.
+
+Run Scenario 1 once. Scenarios 2–8 can be run in any order after that, but 4 depends on 3, and 6 depends on 5.
+
+### Scenario 1 — First-time setup
+
+```
+cp .env.example .env
+npm run db:up
+npm install
+npm run build
+npm run test
+```
+**What you should see:** `docker compose ps` shows `paybridge-redis-1` and `paybridge-sql-1` both `Up`. `npm run build` ends with no `tsc` errors across all 4 packages. `npm run test` prints `2 passed (2)`.
+**What this proves:** the code compiles and the two infra dependencies (Redis, SQL) are reachable — nothing about the app itself yet.
+
+### Scenario 2 — Start all three services, watch the schema get created
+
+In three separate terminals:
+```
+npm run dev:processor
+npm run dev:ingest
+npm run dev:reconciliation
+```
+**What you should see:** `processor` logs `processor started` (only after it silently created the `paybridge` database and `payments` table — first run only, later runs skip straight to this line since the table already exists). `ingest-api` logs `ingest-api listening on port 3001`. `reconciliation-api` logs `reconciliation-api listening on port 3003`.
+**What this proves:** the idempotent schema-init logic in `shared/src/db.ts` works, and all three processes start clean with real (not no-op) dependencies wired in.
+
+### Scenario 3 — A fake QuickBooks payment, end to end
+
+In a fourth terminal:
+```
+curl -s -X POST http://localhost:3001/webhooks/quickbooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "invoice_id": "INV-1042",
+    "customer": "John Smith",
+    "amount_due": 20.00,
+    "currency": "USD",
+    "memo": "Pizza order #482",
+    "status": "paid",
+    "issued_date": "2026-09-03"
+  }'
+```
+**What you should see:** the curl returns `202`. The `processor` terminal immediately logs `[email] confirmation sent to John Smith for qb payment INV-1042 ($20 USD)`. Then:
+```
+curl -s http://localhost:3003/transactions?source=qb
+```
+returns a JSON array with one object — `source_event_id: "INV-1042"`, `amount: 20`, `customer_name: "John Smith"`.
+**What this proves:** the full chain — ingest → normalize → Redis → processor → SQL write → confirmation → read API — works for a payload that never touches Stripe at all.
+
+### Scenario 4 — Idempotency: the same payment can't be recorded twice
+
+Re-run the **exact same** curl command from Scenario 3 again.
+**What you should see:** curl still returns `202` (ingest doesn't know it's a duplicate — that's `processor`'s job, not the webhook's). But the `processor` terminal now logs `[processor] duplicate event INV-1042 — already processed, skipping`, with **no** second `[email]` line. Re-run `curl -s http://localhost:3003/transactions?source=qb` — still exactly **one** row, not two.
+**What this proves:** the `UNIQUE(source, source_event_id)` constraint from `shared/src/db.ts` plus the duplicate-key catch in `processor/src/index.ts` actually prevents double-recording — this is `CLAUDE.md`'s "processing the same payment event twice must not double-record" guardrail, working.
+
+### Scenario 5 — A real, signed Stripe webhook
+
+```
+stripe login          # first time only — opens a browser, pick "Test mode"
+stripe listen --forward-to localhost:3001/webhooks/stripe
+```
+Copy the `whsec_...` value it prints into `.env` as `STRIPE_WEBHOOK_SECRET`, then **restart** `dev:ingest` (env vars are only read once at startup) so it picks up the real secret. In another terminal:
+```
+stripe trigger charge.succeeded
+```
+**What you should see:** the `stripe listen` terminal shows one or more lines like `--> charge.succeeded [evt_...]` followed by `<-- [202] POST .../webhooks/stripe`. `processor` logs a confirmation. `curl -s http://localhost:3003/transactions?source=stripe` shows a row with `source_event_id` starting with `ch_`.
+**What this proves:** `stripe.webhooks.constructEvent()` in `ingest-api/src/index.ts` is actually validating a real cryptographic signature from Stripe — not just trusting whatever arrives at the endpoint.
+
+### Scenario 6 — Stripe sends more than you asked for
+
+Look closely at the `stripe listen` output from Scenario 5 — you'll likely see **more than one** `-->` line (e.g. `payment_intent.created`, `payment_intent.succeeded`, `charge.updated`, alongside `charge.succeeded`), all for the one `stripe trigger` call.
+**What you should see:** every event type gets a response, but only the `charge.succeeded` one is `202` (recorded) — the others come back `200` (acknowledged, not stored). Confirm with `curl -s http://localhost:3003/transactions?source=stripe`: still only **one** stripe row, even though Stripe sent 3–4 events.
+**What this proves:** the `if (event.type !== "charge.succeeded")` check in `ingest-api/src/index.ts` — without it, `payment_intent.*` events get mis-recorded as if they were independent payments (this was a real bug caught by actually running this once — see the Phase 2 commit history).
+
+### Scenario 7 — The queue protects payments when `processor` is down
+
+Stop `processor` (Ctrl+C in its terminal) but leave `ingest-api` and Redis running. Send a new payment:
+```
+curl -s -X POST http://localhost:3001/webhooks/quickbooks \
+  -H "Content-Type: application/json" \
+  -d '{"invoice_id":"INV-DURABILITY-TEST","customer":"Jane Doe","amount_due":15,"currency":"USD","memo":"Coffee","status":"paid","issued_date":"2026-09-06"}'
+```
+**What you should see:** curl still returns `202` immediately — `ingest-api` doesn't care whether anything is downstream. Check `curl -s http://localhost:3003/transactions?source=qb` — `INV-DURABILITY-TEST` is **not** there yet (nothing has consumed it). Now run `npm run dev:processor` again. Within a second or two, it should log the confirmation, and the row now appears in `reconciliation-api`.
+**What this proves:** this is the actual point of putting a queue between `ingest-api` and `processor` — a downed consumer doesn't lose the payment or block ingestion, it just waits in Redis until something's ready to consume it. This is the local stand-in for the "never drop a payment" guarantee `CLAUDE.md` describes (Service Bus does this for real in the cloud phases).
+
+### Scenario 8 (bonus) — SQL data survives a restart, Redis data doesn't
+
+```
+docker compose restart sql
+```
+Wait ~15 seconds, then `curl -s http://localhost:3003/transactions` — all your earlier rows are still there.
+**What this proves:** the `paybridge-sql-data` volume in `docker-compose.yml` is doing its job — SQL is the real source of truth and must survive a restart. (We deliberately did *not* give Redis a volume — try `docker compose restart redis` immediately after sending a payment but before `processor` consumes it, and that message is gone for good. That's the local trade-off flagged in Step 4 above: real durability for the queue itself arrives with Service Bus in Phase 5, not before.)
+
 ## Definition of Done (from `phases.md`)
 
 > A fake payment (from Stripe test mode or the QB mock) flows: ingested → normalized → published to the local queue → consumed by the processor → row written to local SQL → confirmation logged → visible via `GET /transactions` on the reconciliation API.
